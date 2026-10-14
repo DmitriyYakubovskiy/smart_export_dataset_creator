@@ -1,0 +1,6 @@
+let hits=[],index=-1;
+function sendSelection(){const text=window.getSelection().toString();if(text.trim())parent.postMessage({type:'selection',text},location.origin)}
+document.addEventListener('mouseup',sendSelection);document.addEventListener('keyup',sendSelection);
+window.addEventListener('message',e=>{if(e.origin!==location.origin||e.source!==parent||e.data.type!=='find')return;
+if(!hits.length){const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);const nodes=[];while(walker.nextNode())nodes.push(walker.currentNode);for(const node of nodes){const re=/анамнез/gi;let match,last=0;const frag=document.createDocumentFragment();while((match=re.exec(node.textContent))){frag.append(document.createTextNode(node.textContent.slice(last,match.index)));const mark=document.createElement('mark');mark.textContent=match[0];hits.push(mark);frag.append(mark);last=re.lastIndex}if(last){frag.append(document.createTextNode(node.textContent.slice(last)));node.replaceWith(frag)}}}
+if(hits.length){hits[index]?.classList.remove('active');index=(index+1)%hits.length;hits[index].classList.add('active');hits[index].scrollIntoView({block:'center',behavior:'smooth'})}parent.postMessage({type:'found',index:index+1,total:hits.length},location.origin)});

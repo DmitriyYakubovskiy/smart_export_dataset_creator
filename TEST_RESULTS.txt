@@ -1,0 +1,6 @@
+Automated API tests: 5 passed, 1 warning in 1.04s.
+Checked: login/logout, unauthenticated access denied, mutation request protection, DOCX upload and escaped preview, merged cells, source linkage, create/edit/delete histories, reviewed status, CSV/JSON export, invalid input.
+Actual supplied 1.docx: upload, HTML preview, source linkage and JSON export checked.
+JavaScript syntax: node --check passed for app.js and document.js.
+Warning: Starlette TestClient httpx deprecation.
+Docker engine and browser UI verification unavailable in preparation environment; Docker build and visual browser workflow not executed here.
