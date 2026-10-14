@@ -1,0 +1,11 @@
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+const source=fs.readFileSync('app/static/annotations.js','utf8').split('let labelDefs=')[0];
+const sandbox={};vm.createContext(sandbox);vm.runInContext(source,sandbox);
+assert.equal(sandbox.codePointLength('🚬не курит'),9);
+const text='🚬 не курит; не курит';
+const annotations=[{start:2,end:10,label:'SMOKING_MENTION'},{start:5,end:10,label:'OTHER'}];
+const segments=sandbox.spanSegments(text,annotations);
+assert.equal(segments.map(s=>s.text).join(''),text);
+assert.ok(segments.some(s=>s.labels.length===2));
+assert.equal(segments.filter(s=>s.labels.some(a=>a.label==='SMOKING_MENTION')).map(s=>s.text).join(''),'не курит');
+console.log('Unicode offsets, overlapping labels and exact text reconstruction: passed');

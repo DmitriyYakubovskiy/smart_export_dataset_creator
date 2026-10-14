@@ -19,6 +19,7 @@ from fastapi import FastAPI, Request, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from app import annotations
 
 ROOT = Path(__file__).parent
 DATA = Path(os.getenv('DATA_DIR', './data'))
@@ -56,6 +57,11 @@ with db() as c:
     CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS attempts (ip TEXT PRIMARY KEY, count INTEGER, since INTEGER);
     ''')
+
+with db() as c:
+    annotations.initialize(c)
+
+app.include_router(annotations.router(db))
 
 def session_key(token):
     return hmac.new(PASSWORD.encode(), token.encode(), hashlib.sha256).hexdigest()
@@ -209,52 +215,91 @@ class Reviewed(BaseModel):
 @app.patch('/api/documents/{identifier}')
 def reviewed(identifier: str, value: Reviewed):
     get_document(identifier)
-    with db() as c: c.execute('UPDATE documents SET reviewed=? WHERE id=?',(int(value.reviewed),identifier))
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if value.reviewed:
+            for row in c.execute('SELECT id FROM histories WHERE document_id=?',(identifier,)).fetchall(): annotations.require_values(c,row['id'])
+        c.execute('UPDATE documents SET reviewed=?,workflow_status=? WHERE id=?',(int(value.reviewed),'done' if value.reviewed else 'in_progress',identifier))
     return {'ok':True}
 
 class History(BaseModel):
     title: str = Field(default='Анамнез', max_length=150)
     text: str = Field(min_length=1, max_length=200000)
+    values: dict = Field(default_factory=dict)
 
 @app.get('/api/documents/{identifier}/histories')
 def histories(identifier: str):
     get_document(identifier)
-    with db() as c: rows=c.execute('SELECT * FROM histories WHERE document_id=? ORDER BY created,id',(identifier,)).fetchall()
-    return [dict(row) for row in rows]
+    with db() as c:
+        c.execute('BEGIN')
+        rows=c.execute('SELECT * FROM histories WHERE document_id=? ORDER BY created,id',(identifier,)).fetchall()
+        return [{**dict(row),'values':annotations.values(c,row['id'])} for row in rows]
 
 @app.post('/api/documents/{identifier}/histories', status_code=201)
 def add(identifier: str, value: History):
     get_document(identifier)
     if not value.text.strip(): raise HTTPException(400,'Введите текст анамнеза')
     key=uuid.uuid4().hex; now=int(time.time())
-    with db() as c: c.execute('INSERT INTO histories VALUES(?,?,?,?,?,?)',(key,identifier,value.title.strip() or 'Анамнез',value.text.strip(),now,now))
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        c.execute('INSERT INTO histories(id,document_id,title,text,created,updated) VALUES(?,?,?,?,?,?)',(key,identifier,value.title.strip() or 'Анамнез',value.text.strip(),now,now))
+        annotations.save_values(c,key,value.values)
+        annotations.reopen_document(c,identifier)
     return {'id':key}
 
 @app.put('/api/histories/{identifier}')
 def edit(identifier: str, value: History):
     if not value.text.strip(): raise HTTPException(400,'Введите текст анамнеза')
     with db() as c:
-        result=c.execute('UPDATE histories SET title=?,text=?,updated=? WHERE id=?',(value.title.strip() or 'Анамнез',value.text.strip(),int(time.time()),identifier))
-        if result.rowcount==0: raise HTTPException(404,'Анамнез не найден')
+        c.execute('BEGIN IMMEDIATE')
+        previous=annotations.get_history(c,identifier)
+        changed=previous['text'] != value.text.strip()
+        if changed and c.execute('SELECT 1 FROM annotations WHERE history_id=?',(identifier,)).fetchone():
+            raise HTTPException(409,'Текст содержит разметку. Сначала удалите её в разделе «Разметка», чтобы не сместить позиции.')
+        c.execute('UPDATE histories SET title=?,text=?,updated=? WHERE id=?',
+            (value.title.strip() or 'Анамнез',value.text.strip(),int(time.time()),identifier))
+        annotations.save_values(c,identifier,value.values)
+        if changed or previous['values']!=annotations.values(c,identifier):
+            annotations.reopen(c,identifier)
+            annotations.reopen_document(c,previous['document_id'])
     return {'ok':True}
 
 @app.delete('/api/histories/{identifier}')
 def delete(identifier: str):
     with db() as c:
-        if c.execute('DELETE FROM histories WHERE id=?',(identifier,)).rowcount==0: raise HTTPException(404,'Анамнез не найден')
+        c.execute('BEGIN IMMEDIATE')
+        old=annotations.get_history(c,identifier)
+        c.execute('DELETE FROM histories WHERE id=?',(identifier,))
+        annotations.reopen_document(c,old['document_id'])
     return {'ok':True}
 
 @app.get('/api/export/{kind}')
-def export(kind: str):
+def export(kind: str, status: str = 'all'):
+    if status not in {'all','pending','completed'}: raise HTTPException(400,'Неизвестный статус')
     with db() as c:
-        rows=[dict(r) for r in c.execute('SELECT h.id,h.document_id,d.name AS document_name,h.title,h.text,h.created,h.updated FROM histories h JOIN documents d ON d.id=h.document_id ORDER BY d.name,h.created')]
+        c.execute('BEGIN')
+        rows=[dict(r) for r in c.execute('''SELECT h.id,h.document_id,d.name AS document_name,h.title,h.text,h.created,h.updated,h.workflow_status,d.workflow_status AS document_status,
+            COALESCE(r.completed,0) AS completed FROM histories h JOIN documents d ON d.id=h.document_id
+            LEFT JOIN annotation_reviews r ON r.history_id=h.id ORDER BY d.name,h.created''')]
+        all_spans=annotations.annotation_rows(c)
+        by_history={}
+        for span in all_spans: by_history.setdefault(span['history_id'],[]).append(span)
+        for row in rows:
+            row['annotations']=by_history.get(row['id'],[])
+            stored=annotations.values(c,row['id'])
+            row['columns']=[{'label_id':col['id'],'code':col['code'],'name':col['name'],'data_type':col['data_type'],'active':bool(col['active']),'value':stored.get(col['id'])} for col in annotations.columns(c)]
+            row['schema_revision']=annotations.revision(c)
+            row['offset_unit']='unicode_codepoint'
+            row['end_exclusive']=True
+        if status!='all': rows=[r for r in rows if bool(r['completed'])==(status=='completed')]
     if kind=='json':
         content=json.dumps(rows,ensure_ascii=False,indent=2).encode()
         media='application/json'
     elif kind=='csv':
-        stream=io.StringIO(newline=''); fields=['id','document_id','document_name','title','text','created','updated']
+        stream=io.StringIO(newline=''); fields=['id','document_id','document_name','title','text','created','updated','workflow_status','document_status','completed','annotations','columns','schema_revision','offset_unit','end_exclusive']
         writer=csv.DictWriter(stream,fieldnames=fields,delimiter=';');writer.writeheader()
         for row in rows:
+            row={**row,'annotations':json.dumps(row['annotations'],ensure_ascii=False),'columns':json.dumps(row['columns'],ensure_ascii=False)}
             # Prevent spreadsheet formula interpretation of user-entered text.
             writer.writerow({k:("'"+v if isinstance(v,str) and v.lstrip().startswith(('=','+','-','@')) else v) for k,v in row.items()})
         content=stream.getvalue().encode('utf-8-sig');media='text/csv'

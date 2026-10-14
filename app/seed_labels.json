@@ -1,0 +1,3 @@
+[
+  {"code":"SMOKING_MENTION","name":"Курение","color":"#f5cc76","data_type":"enum","options":["курит","не курит","бросил","неизвестно"]}
+]

@@ -66,6 +66,10 @@ def test_crud_export_persistence(client):
     row=next(r for r in rows if r['id']==hid)
     assert row['document_name']=='история.docx' and row['text']=='Уточнённый анамнез'
     assert client.get('/api/export/csv').content.startswith(b'\xef\xbb\xbf')
+    for h in client.get(f'/api/documents/{identifier}/histories').json():
+        columns=client.get('/api/labels').json()
+        entered={l['id']:(0 if l['data_type']=='int' else False if l['data_type']=='bool' else l['options'][0]) for l in columns if l['active']}
+        assert client.put('/api/histories/'+h['id'],json={'title':h['title'],'text':h['text'],'values':entered}).status_code==200
     assert client.patch(f'/api/documents/{identifier}',json={'reviewed':True}).status_code==200
     assert next(d for d in client.get('/api/documents').json() if d['id']==identifier)['reviewed']==1
     assert client.delete(f'/api/histories/{hid}').status_code==200

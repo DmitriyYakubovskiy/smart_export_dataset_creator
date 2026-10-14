@@ -1,6 +1,7 @@
-Automated API tests: 5 passed, 1 warning in 1.04s.
-Checked: login/logout, unauthenticated access denied, mutation request protection, DOCX upload and escaped preview, merged cells, source linkage, create/edit/delete histories, reviewed status, CSV/JSON export, invalid input.
-Actual supplied 1.docx: upload, HTML preview, source linkage and JSON export checked.
-JavaScript syntax: node --check passed for app.js and document.js.
+2026-10-14: 34 API/database tests passed, 1 warning in 2.32s.
+Verified: Word upload and protected access; document/history source links; typed int/bool/enum values; strict rejection of wrong types; correct preservation of false and zero; independent document/history workflow statuses; opening new items marks in progress; new columns reset all completed items without deleting annotations; stale schema completion rejected; fragment result creation/update; explicit history_id/document_id in annotations and export; preservation of old data on migration; restart idempotence; Unicode offsets, repeated mentions, overlap, duplicate and text version checks; safe text editing and cascade deletion; CSV/JSON export.
+Node: Unicode offsets, overlapping labels and exact text reconstruction passed.
+node --check: app.js, columns.js, annotations.js passed.
+HTML: unique IDs; all literal JavaScript element selectors resolve to existing IDs.
 Warning: Starlette TestClient httpx deprecation.
-Docker engine and browser UI verification unavailable in preparation environment; Docker build and visual browser workflow not executed here.
+Docker build and browser pointer interaction were not executed in this environment.

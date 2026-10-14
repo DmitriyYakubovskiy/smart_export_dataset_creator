@@ -179,3 +179,12 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+
+# User documents and dataset
+data/
+*.sqlite3*
+*.docx
+*.doc
+*.pdf
+reports/
