@@ -12,6 +12,7 @@ import uuid
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Literal
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -226,6 +227,7 @@ class History(BaseModel):
     title: str = Field(default='Анамнез', max_length=150)
     text: str = Field(min_length=1, max_length=200000)
     values: dict = Field(default_factory=dict)
+    value_states: dict[str, Literal['value','no_data','unreviewed']] = Field(default_factory=dict)
 
 @app.get('/api/documents/{identifier}/histories')
 def histories(identifier: str):
@@ -233,7 +235,7 @@ def histories(identifier: str):
     with db() as c:
         c.execute('BEGIN')
         rows=c.execute('SELECT * FROM histories WHERE document_id=? ORDER BY created,id',(identifier,)).fetchall()
-        return [{**dict(row),'values':annotations.values(c,row['id'])} for row in rows]
+        return [{**dict(row),'values':annotations.values(c,row['id']),'value_states':annotations.value_states(c,row['id'])} for row in rows]
 
 @app.post('/api/documents/{identifier}/histories', status_code=201)
 def add(identifier: str, value: History):
@@ -243,7 +245,7 @@ def add(identifier: str, value: History):
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
         c.execute('INSERT INTO histories(id,document_id,title,text,created,updated) VALUES(?,?,?,?,?,?)',(key,identifier,value.title.strip() or 'Анамнез',value.text.strip(),now,now))
-        annotations.save_values(c,key,value.values)
+        annotations.save_values(c,key,value.values,value.value_states)
         annotations.reopen_document(c,identifier)
     return {'id':key}
 
@@ -258,7 +260,7 @@ def edit(identifier: str, value: History):
             raise HTTPException(409,'Текст содержит разметку. Сначала удалите её в разделе «Разметка», чтобы не сместить позиции.')
         c.execute('UPDATE histories SET title=?,text=?,updated=? WHERE id=?',
             (value.title.strip() or 'Анамнез',value.text.strip(),int(time.time()),identifier))
-        annotations.save_values(c,identifier,value.values)
+        annotations.save_values(c,identifier,value.values,value.value_states)
         if changed or previous['values']!=annotations.values(c,identifier):
             annotations.reopen(c,identifier)
             annotations.reopen_document(c,previous['document_id'])
@@ -287,7 +289,8 @@ def export(kind: str, status: str = 'all'):
         for row in rows:
             row['annotations']=by_history.get(row['id'],[])
             stored=annotations.values(c,row['id'])
-            row['columns']=[{'label_id':col['id'],'code':col['code'],'name':col['name'],'data_type':col['data_type'],'active':bool(col['active']),'value':stored.get(col['id'])} for col in annotations.columns(c)]
+            states=annotations.value_states(c,row['id'])
+            row['columns']=[{'label_id':col['id'],'code':col['code'],'name':col['name'],'data_type':col['data_type'],'active':bool(col['active']),'value':stored.get(col['id']),'state':states[col['id']]} for col in annotations.columns(c)]
             row['schema_revision']=annotations.revision(c)
             row['offset_unit']='unicode_codepoint'
             row['end_exclusive']=True

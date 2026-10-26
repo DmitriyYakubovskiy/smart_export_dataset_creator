@@ -95,13 +95,24 @@ def values(c,identifier):
     return {r['label_id']:json.loads(r['value']) for r in c.execute('SELECT * FROM history_values WHERE history_id=?',(identifier,))}
 
 
-def save_values(c,identifier,entered):
+def value_states(c,identifier):
+    stored=values(c,identifier)
+    return {col['id']:('unreviewed' if col['id'] not in stored else 'no_data' if stored[col['id']] is None else 'value') for col in columns(c)}
+
+
+def save_values(c,identifier,entered,states=None):
+    states=states or {}
     active={col['id']:col for col in columns(c) if col['active']}
-    for label_id,value in entered.items():
+    for label_id in entered.keys() | states.keys():
         if label_id not in active: raise HTTPException(400,'Колонка удалена или отключена. Обновите страницу.')
-        if value is None: c.execute('DELETE FROM history_values WHERE history_id=? AND label_id=?',(identifier,label_id))
+        value=entered.get(label_id)
+        state=states.get(label_id,'unreviewed' if value is None else 'value')
+        if state in {'no_data','unreviewed'} and value is not None:
+            raise HTTPException(400,'Состояние колонки не соответствует её значению')
+        if state=='unreviewed': c.execute('DELETE FROM history_values WHERE history_id=? AND label_id=?',(identifier,label_id))
         else:
-            validate_value(active[label_id],value)
+            if state=='value': validate_value(active[label_id],value)
+            # JSON null is an explicitly checked absence; no row means unreviewed.
             c.execute('INSERT INTO history_values VALUES(?,?,?) ON CONFLICT(history_id,label_id) DO UPDATE SET value=excluded.value',
                 (identifier,label_id,json.dumps(value,ensure_ascii=False)))
 
@@ -110,8 +121,8 @@ def require_values(c,identifier):
     stored=values(c,identifier)
     for col in columns(c):
         if not col['active']: continue
-        if col['id'] not in stored: raise HTTPException(400,'Заполните колонку «'+col['name']+'» у всех анамнезов')
-        validate_value(col,stored[col['id']])
+        if col['id'] not in stored: raise HTTPException(400,'Проверьте колонку «'+col['name']+'»: укажите значение или выберите «Нет данных»')
+        if stored[col['id']] is not None: validate_value(col,stored[col['id']])
 
 
 def reopen_document(c,document_id):
@@ -130,7 +141,10 @@ def annotation_rows(c,history_id=None):
       JOIN documents d ON d.id=h.document_id'''
     if history_id is not None: query+=' WHERE a.history_id=?'
     rows=[dict(r) for r in c.execute(query+' ORDER BY a.start,a.end,a.created,a.id',() if history_id is None else (history_id,))]
-    for row in rows: row['result']=json.loads(row['result']) if row['result'] is not None else None
+    for row in rows:
+        raw=row['result']
+        row['result']=json.loads(raw) if raw is not None else None
+        row['result_state']='unreviewed' if raw is None else 'no_data' if row['result'] is None else 'value'
     return rows
 
 
@@ -139,7 +153,7 @@ def get_history(c,identifier):
       FROM histories h JOIN documents d ON d.id=h.document_id
       LEFT JOIN annotation_reviews r ON r.history_id=h.id WHERE h.id=?''',(identifier,)).fetchone()
     if row is None: raise HTTPException(404,'Анамнез не найден')
-    return {**dict(row),'text_hash':text_hash(row['text']),'values':values(c,identifier),'schema_revision':revision(c)}
+    return {**dict(row),'text_hash':text_hash(row['text']),'values':values(c,identifier),'value_states':value_states(c,identifier),'schema_revision':revision(c)}
 
 
 def check_version(history,expected):
@@ -165,6 +179,15 @@ class Span(BaseModel):
     text: str=Field(min_length=1,max_length=200000)
     text_hash: str
     result: Any
+    result_state: Literal['value','no_data','unreviewed']='value'
+
+
+def span_result(column,value):
+    if value.result_state=='value':
+        validate_value(column,value.result)
+    elif value.result is not None:
+        raise HTTPException(400,'Состояние фрагмента не соответствует его результату')
+    return None if value.result_state=='unreviewed' else json.dumps(value.result,ensure_ascii=False)
 
 class Version(BaseModel):
     text_hash: str
@@ -266,11 +289,11 @@ def router(db):
             if h['text'][value.start:value.end]!=value.text or not value.text.strip(): raise HTTPException(400,'Фрагмент не совпадает с позициями')
             col=next((l for l in columns(c) if l['id']==value.label_id and l['active']),None)
             if col is None: raise HTTPException(400,'Выберите активную колонку')
-            validate_value(col,value.result)
+            result=span_result(col,value)
             key=uuid.uuid4().hex
             try:
                 c.execute('INSERT INTO annotations(id,history_id,label_id,start,end,text,created,result) VALUES(?,?,?,?,?,?,?,?)',
-                    (key,identifier,value.label_id,value.start,value.end,value.text,int(time.time()),json.dumps(value.result,ensure_ascii=False)))
+                    (key,identifier,value.label_id,value.start,value.end,value.text,int(time.time()),result))
             except sqlite3.IntegrityError: raise HTTPException(409,'Этот фрагмент уже размечен этой колонкой')
             reopen(c,identifier)
         return {'id':key}
@@ -284,8 +307,8 @@ def router(db):
             if not row: raise HTTPException(404,'Фрагмент не найден')
             if (row['label_id'],row['start'],row['end'],row['text'])!=(value.label_id,value.start,value.end,value.text): raise HTTPException(400,'Этот запрос меняет только результат фрагмента')
             col=next(l for l in columns(c) if l['id']==value.label_id)
-            validate_value(col,value.result)
-            c.execute('UPDATE annotations SET result=? WHERE id=?',(json.dumps(value.result,ensure_ascii=False),annotation_id));reopen(c,identifier)
+            result=span_result(col,value)
+            c.execute('UPDATE annotations SET result=? WHERE id=?',(result,annotation_id));reopen(c,identifier)
         return {'ok':True}
 
     @api.delete('/histories/{identifier}/annotations/{annotation_id}')
@@ -311,8 +334,8 @@ def router(db):
                 require_values(c,identifier)
                 for span in annotation_rows(c,identifier):
                     col=next(l for l in columns(c) if l['id']==span['label_id'])
-                    if span['result'] is None: raise HTTPException(400,'Заполните результат у каждого выделенного фрагмента')
-                    validate_value(col,span['result'])
+                    if span['result_state']=='unreviewed': raise HTTPException(400,'Проверьте результат каждого фрагмента: укажите значение или выберите «Нет данных»')
+                    if span['result_state']=='value': validate_value(col,span['result'])
             c.execute('INSERT INTO annotation_reviews VALUES(?,?,?) ON CONFLICT(history_id) DO UPDATE SET completed=excluded.completed,updated=excluded.updated',(identifier,int(value.completed),int(time.time())))
             c.execute('UPDATE histories SET workflow_status=? WHERE id=?',('done' if value.completed else 'in_progress',identifier))
         return {'ok':True}
